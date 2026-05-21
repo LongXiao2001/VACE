@@ -21,10 +21,8 @@ python vace/vace_wan_long_inference.py \
   --sample_shift 16 \
   --sample_guide_scale 5.0 \
   --offload_model true \
-  --module_vram_management true \
-  --module_vram_empty_cache true \
-  --module_vram_verbose true \
-  --block_swap true \
-  --vace_hint_cpu_offload true \
+  --layer_vram_management true \
+  --num_persistent_param_in_dit 6000000000 \
+  --layer_vram_verbose true \
   --memory_log true \
   --memory_log_prefix "VACE-LongPose"

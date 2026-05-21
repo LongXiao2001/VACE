@@ -240,6 +240,11 @@ def main(args):
         module_vram_empty_cache=args.module_vram_empty_cache,
         module_vram_verbose=args.module_vram_verbose,
         module_vram_keep_resident=args.module_vram_keep_resident,
+        memory_log=args.memory_log,
+        memory_log_prefix=args.memory_log_prefix,
+        layer_vram_management=args.layer_vram_management,
+        num_persistent_param_in_dit=args.num_persistent_param_in_dit,
+        layer_vram_verbose=args.layer_vram_verbose,
     )
 
     frames, fps, _, _, total_frames = read_video_frames(args.src_video, use_type="cv2", info=True)

@@ -233,6 +233,21 @@ def get_parser():
         type=str,
         default="WanVace",
         help="Prefix used in CUDA memory log lines.")
+    parser.add_argument(
+        "--layer_vram_management",
+        type=str2bool,
+        default=False,
+        help="Enable DiffSynth/Pusa-style layer-level VRAM management wrappers.")
+    parser.add_argument(
+        "--num_persistent_param_in_dit",
+        type=int,
+        default=None,
+        help="How many DiT parameters are allowed to stay GPU-persistent under layer VRAM management.")
+    parser.add_argument(
+        "--layer_vram_verbose",
+        type=str2bool,
+        default=False,
+        help="Print layer-level onload/offload traces.")
     return parser
 
 
@@ -348,6 +363,9 @@ def main(args):
         module_vram_keep_resident=args.module_vram_keep_resident,
         memory_log=args.memory_log,
         memory_log_prefix=args.memory_log_prefix,
+        layer_vram_management=args.layer_vram_management,
+        num_persistent_param_in_dit=args.num_persistent_param_in_dit,
+        layer_vram_verbose=args.layer_vram_verbose,
     )
 
     src_video, src_mask, src_ref_images = wan_vace.prepare_source([args.src_video],

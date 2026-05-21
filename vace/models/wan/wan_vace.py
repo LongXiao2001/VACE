@@ -15,6 +15,7 @@ from functools import partial
 from PIL import Image
 import torchvision.transforms.functional as TF
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch.cuda.amp as amp
 import torch.distributed as dist
@@ -26,6 +27,13 @@ from wan.text2video import (WanT2V, T5EncoderModel, WanVAE, shard_model, FlowDPM
 from .modules.model import VaceWanModel
 from .lora_utils import LoRAManager
 from .runtime_vram import ModuleVRAMManager
+from .layer_vram import (
+    AutoWrappedLinear,
+    AutoWrappedModule,
+    enable_layer_vram_management,
+    wrapped_model_offload,
+    wrapped_model_onload,
+)
 from ..utils.preprocessor import VaceVideoProcessor
 
 
@@ -129,6 +137,7 @@ class WanVace(WanT2V):
         self.vram_manager = None
         self.memory_log_enabled = False
         self.memory_log_prefix = "WanVace"
+        self.layer_vram_enabled = False
 
     def configure_runtime(
         self,
@@ -143,9 +152,20 @@ class WanVace(WanT2V):
         module_vram_keep_resident=False,
         memory_log=False,
         memory_log_prefix="WanVace",
+        layer_vram_management=False,
+        num_persistent_param_in_dit=None,
+        layer_vram_verbose=False,
     ):
         self.memory_log_enabled = memory_log
         self.memory_log_prefix = memory_log_prefix
+        self.layer_vram_enabled = layer_vram_management
+        if layer_vram_management:
+            block_swap = False
+            module_vram_management = False
+            self._enable_layer_vram_management(
+                num_persistent_param_in_dit=num_persistent_param_in_dit,
+                verbose=layer_vram_verbose,
+            )
         self.model.enable_block_swap(enabled=block_swap, device=self.device)
         self.model.enable_vace_hint_cpu_offload(enabled=vace_hint_cpu_offload)
         self.vram_manager = ModuleVRAMManager(
@@ -166,6 +186,93 @@ class WanVace(WanT2V):
             )
         else:
             self.lora_manager = None
+
+    def _collect_named_module_types(self, root_module, names):
+        classes = []
+        for module in root_module.modules():
+            if type(module).__name__ in names:
+                cls = type(module)
+                if cls not in classes:
+                    classes.append(cls)
+        return classes
+
+    def _enable_layer_vram_management(self, num_persistent_param_in_dit=None, verbose=False):
+        text_dtype = next(iter(self.text_encoder.model.parameters())).dtype
+        text_module_map = {
+            nn.Linear: AutoWrappedLinear,
+            nn.Embedding: AutoWrappedModule,
+        }
+        for cls in self._collect_named_module_types(self.text_encoder.model, {"T5RelativeEmbedding", "T5LayerNorm"}):
+            text_module_map[cls] = AutoWrappedModule
+        enable_layer_vram_management(
+            self.text_encoder.model,
+            module_map=text_module_map,
+            module_config=dict(
+                offload_dtype=text_dtype,
+                offload_device="cpu",
+                onload_dtype=text_dtype,
+                onload_device="cpu",
+                computation_dtype=self.config.t5_dtype,
+                computation_device=self.device,
+                verbose=verbose,
+            ),
+        )
+
+        dit_dtype = next(iter(self.model.parameters())).dtype
+        dit_module_map = {
+            nn.Linear: AutoWrappedLinear,
+            nn.Conv3d: AutoWrappedModule,
+            nn.LayerNorm: AutoWrappedModule,
+        }
+        for cls in self._collect_named_module_types(self.model, {"WanLayerNorm", "WanRMSNorm", "RMSNorm"}):
+            dit_module_map[cls] = AutoWrappedModule
+        enable_layer_vram_management(
+            self.model,
+            module_map=dit_module_map,
+            module_config=dict(
+                offload_dtype=dit_dtype,
+                offload_device="cpu",
+                onload_dtype=dit_dtype,
+                onload_device=self.device,
+                computation_dtype=self.param_dtype,
+                computation_device=self.device,
+                verbose=verbose,
+            ),
+            max_num_param=num_persistent_param_in_dit,
+            overflow_module_config=dict(
+                offload_dtype=dit_dtype,
+                offload_device="cpu",
+                onload_dtype=dit_dtype,
+                onload_device="cpu",
+                computation_dtype=self.param_dtype,
+                computation_device=self.device,
+                verbose=verbose,
+            ),
+        )
+
+        vae_dtype = next(iter(self.vae.model.parameters())).dtype
+        vae_module_map = {
+            nn.Linear: AutoWrappedLinear,
+            nn.Conv2d: AutoWrappedModule,
+            nn.Conv3d: AutoWrappedModule,
+            nn.SiLU: AutoWrappedModule,
+            nn.Dropout: AutoWrappedModule,
+        }
+        for cls in self._collect_named_module_types(self.vae.model, {"RMS_norm", "RMSNorm", "Upsample", "CausalConv3d"}):
+            vae_module_map[cls] = AutoWrappedModule
+        enable_layer_vram_management(
+            self.vae.model,
+            module_map=vae_module_map,
+            module_config=dict(
+                offload_dtype=vae_dtype,
+                offload_device="cpu",
+                onload_dtype=vae_dtype,
+                onload_device=self.device,
+                computation_dtype=vae_dtype,
+                computation_device=self.device,
+                verbose=verbose,
+            ),
+        )
 
     def _register_vram_modules(self):
         if self.vram_manager is None:
@@ -415,7 +522,9 @@ class WanVace(WanT2V):
         self._log_cuda_memory("generate:start")
 
         if not self.t5_cpu:
-            if self.vram_manager is not None:
+            if self.layer_vram_enabled:
+                wrapped_model_onload(self.text_encoder.model)
+            elif self.vram_manager is not None:
                 self.vram_manager.load_modules(["text_encoder"])
             else:
                 self.text_encoder.model.to(self.device)
@@ -423,7 +532,9 @@ class WanVace(WanT2V):
             context = self.text_encoder([input_prompt], self.device)
             context_null = self.text_encoder([n_prompt], self.device)
             self._log_cuda_memory("text_encoder:after_encode")
-            if self.vram_manager is not None and self.vram_manager.enabled:
+            if self.layer_vram_enabled:
+                wrapped_model_offload(self.text_encoder.model)
+            elif self.vram_manager is not None and self.vram_manager.enabled:
                 self.vram_manager.unload_modules(["text_encoder"])
             elif offload_model:
                 self.text_encoder.model.cpu()
@@ -434,14 +545,18 @@ class WanVace(WanT2V):
             context_null = [t.to(self.device) for t in context_null]
 
         # vace context encode
-        if self.vram_manager is not None and self.vram_manager.enabled:
+        if self.layer_vram_enabled:
+            wrapped_model_onload(self.vae.model)
+        elif self.vram_manager is not None and self.vram_manager.enabled:
             self.vram_manager.load_modules(["vae"])
         self._log_cuda_memory("vae:before_encode")
         z0 = self.vace_encode_frames(input_frames, input_ref_images, masks=input_masks)
         m0 = self.vace_encode_masks(input_masks, input_ref_images)
         z = self.vace_latent(z0, m0)
         self._log_cuda_memory("vae:after_encode")
-        if self.vram_manager is not None and self.vram_manager.enabled:
+        if self.layer_vram_enabled:
+            wrapped_model_offload(self.vae.model)
+        elif self.vram_manager is not None and self.vram_manager.enabled:
             self.vram_manager.unload_modules(["vae"])
 
         target_shape = list(z0[0].shape)
@@ -468,7 +583,7 @@ class WanVace(WanT2V):
 
         # evaluation mode
         with amp.autocast(dtype=self.param_dtype), torch.no_grad(), no_sync():
-            if getattr(self.model, "_block_swap_enabled", False) or (self.vram_manager is not None and self.vram_manager.enabled):
+            if (not self.layer_vram_enabled) and (getattr(self.model, "_block_swap_enabled", False) or (self.vram_manager is not None and self.vram_manager.enabled)):
                 self.model.prepare_runtime_modules(self.device)
 
             if sample_solver == 'unipc':
@@ -505,7 +620,9 @@ class WanVace(WanT2V):
                 timestep = torch.stack(timestep)
                 self._log_cuda_memory(f"denoise_step:{step_idx}:before_model")
 
-                if not getattr(self.model, "_block_swap_enabled", False) and not (self.vram_manager is not None and self.vram_manager.enabled):
+                if self.layer_vram_enabled:
+                    wrapped_model_onload(self.model)
+                elif not getattr(self.model, "_block_swap_enabled", False) and not (self.vram_manager is not None and self.vram_manager.enabled):
                     self.model.to(self.device)
                 lora_context = self.lora_manager.activated() if self.lora_manager is not None else noop_no_sync()
                 with lora_context:
@@ -513,6 +630,8 @@ class WanVace(WanT2V):
                         latent_model_input, t=timestep, vace_context=z, vace_context_scale=context_scale, **arg_c)[0]
                     noise_pred_uncond = self.model(
                         latent_model_input, t=timestep, vace_context=z, vace_context_scale=context_scale, **arg_null)[0]
+                if self.layer_vram_enabled:
+                    wrapped_model_offload(self.model)
                 self._log_cuda_memory(f"denoise_step:{step_idx}:after_model")
 
                 noise_pred = noise_pred_uncond + guide_scale * (
@@ -530,18 +649,24 @@ class WanVace(WanT2V):
             x0 = latents
             if self.lora_manager is not None and self.lora_manager.active:
                 self.lora_manager.remove()
-            if self.vram_manager is not None and self.vram_manager.enabled:
+            if self.layer_vram_enabled:
+                wrapped_model_offload(self.model)
+            elif self.vram_manager is not None and self.vram_manager.enabled:
                 self.vram_manager.unload_modules()
             elif offload_model:
                 self.model.cpu()
                 torch.cuda.empty_cache()
             if self.rank == 0:
-                if self.vram_manager is not None and self.vram_manager.enabled:
+                if self.layer_vram_enabled:
+                    wrapped_model_onload(self.vae.model)
+                elif self.vram_manager is not None and self.vram_manager.enabled:
                     self.vram_manager.load_modules(["vae"])
                 self._log_cuda_memory("vae:before_decode")
                 videos = self.decode_latent(x0, input_ref_images)
                 self._log_cuda_memory("vae:after_decode")
-                if self.vram_manager is not None and self.vram_manager.enabled:
+                if self.layer_vram_enabled:
+                    wrapped_model_offload(self.vae.model)
+                elif self.vram_manager is not None and self.vram_manager.enabled:
                     self.vram_manager.unload_modules(["vae"])
 
         del noise, latents

@@ -67,10 +67,11 @@ class LoRAManager:
             alpha = parts.get("alpha", rank)
             lora_scale = self.scale * (alpha / rank)
 
-            if isinstance(module, nn.Linear):
+            weight_ndim = getattr(module.weight, "ndim", None)
+            if weight_ndim == 2:
                 delta = torch.matmul(up_weight, down_weight)
                 delta = delta.view_as(module.weight).contiguous()
-            elif isinstance(module, (nn.Conv2d, nn.Conv3d)):
+            elif weight_ndim in (4, 5):
                 delta = torch.matmul(
                     up_weight.reshape(up_weight.shape[0], -1),
                     down_weight.reshape(down_weight.shape[0], -1),

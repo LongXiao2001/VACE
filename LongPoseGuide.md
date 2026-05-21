@@ -11,6 +11,9 @@ This extension adds a long pose-driven video workflow on top of VACE-Wan.
   - accepts `.safetensors` and `.pt`
   - can apply/remove LoRA on demand during denoising
 - VRAM optimizations
+  - `--layer_vram_management true`: Pusa/DiffSynth-style layer wrapper offload
+  - `--num_persistent_param_in_dit 6000000000`: how many DiT parameters may stay GPU-persistent
+  - `--layer_vram_verbose true`: print wrapped layer onload/offload traces
   - `--module_vram_management true`: DiffSynth-style per-module load/unload scheduling
   - `--module_vram_empty_cache true`: clear allocator cache after unloading managed modules
   - `--module_vram_verbose true`: print each module load/unload together with live/max VRAM
@@ -47,11 +50,10 @@ python vace/vace_wan_long_inference.py \
   --overlap_frames 17 \
   --strategy keyframe \
   --anchor_stride 2 \
-  --module_vram_management true \
-  --module_vram_verbose true \
+  --layer_vram_management true \
+  --num_persistent_param_in_dit 6000000000 \
+  --layer_vram_verbose true \
   --offload_model true \
-  --block_swap true \
-  --vace_hint_cpu_offload true \
   --memory_log true
 ```
 
@@ -65,11 +67,10 @@ python vace/vace_wan_long_inference.py \
   --window_frames 81 \
   --overlap_frames 17 \
   --strategy autoregressive \
-  --module_vram_management true \
-  --module_vram_verbose true \
+  --layer_vram_management true \
+  --num_persistent_param_in_dit 6000000000 \
+  --layer_vram_verbose true \
   --offload_model true \
-  --block_swap true \
-  --vace_hint_cpu_offload true \
   --memory_log true
 ```
 
@@ -84,11 +85,10 @@ python vace/vace_wan_long_inference.py \
   --lora_scale 1.0 \
   --lora_dyn_offload true \
   --strategy keyframe \
-  --module_vram_management true \
-  --module_vram_verbose true \
+  --layer_vram_management true \
+  --num_persistent_param_in_dit 6000000000 \
+  --layer_vram_verbose true \
   --offload_model true \
-  --block_swap true \
-  --vace_hint_cpu_offload true \
   --memory_log true
 ```
 
@@ -97,6 +97,7 @@ python vace/vace_wan_long_inference.py \
 - The current long video entry is tuned for single GPU execution.
 - `window_frames` must satisfy `4n+1`.
 - `overlap_frames` should stay modest. `17` is a practical default for `81` frame windows.
-- If you want the closest behavior to DiffSynth `enable_vram_management`, enable both `--module_vram_management true` and `--block_swap true`.
+- If you want the closest behavior to `Pusa-VidGen/PusaV1/diffsynth`, prefer `--layer_vram_management true` and tune `--num_persistent_param_in_dit`.
+- The newer layer-level mode and the older module/block-level mode should not be mixed unless you are debugging.
 - If you want to debug actual VRAM peaks on a 4090, add both `--module_vram_verbose true` and `--memory_log true`.
 - If you want to inspect all temporary pose windows and intermediate anchor references, pass `--keep_temps`.
