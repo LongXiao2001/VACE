@@ -341,6 +341,14 @@ def main(args):
         logging.info(f"Extended prompt: {args.prompt}")
 
     logging.info("Creating WanT2V pipeline.")
+    init_on_cpu = bool(
+        args.layer_vram_management
+        or args.module_vram_management
+        or args.block_swap
+        or args.vace_hint_cpu_offload
+        or args.t5_cpu
+    )
+    logging.info("WanVace init_on_cpu=%s", init_on_cpu)
     wan_vace = WanVace(
         config=cfg,
         checkpoint_dir=args.ckpt_dir,
@@ -350,6 +358,7 @@ def main(args):
         dit_fsdp=args.dit_fsdp,
         use_usp=(args.ulysses_size > 1 or args.ring_size > 1),
         t5_cpu=args.t5_cpu,
+        init_on_cpu=init_on_cpu,
     )
     wan_vace.configure_runtime(
         block_swap=args.block_swap,

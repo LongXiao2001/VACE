@@ -48,6 +48,7 @@ class WanVace(WanT2V):
         dit_fsdp=False,
         use_usp=False,
         t5_cpu=False,
+        init_on_cpu=False,
     ):
         r"""
         Initializes the Wan text-to-video generation model components.
@@ -74,6 +75,8 @@ class WanVace(WanT2V):
         self.config = config
         self.rank = rank
         self.t5_cpu = t5_cpu
+        self.init_on_cpu = init_on_cpu
+        self.model_init_device = torch.device("cpu") if init_on_cpu else self.device
 
         self.num_train_timesteps = config.num_train_timesteps
         self.param_dtype = config.param_dtype
@@ -91,7 +94,7 @@ class WanVace(WanT2V):
         self.patch_size = config.patch_size
         self.vae = WanVAE(
             vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint),
-            device=self.device)
+            device=self.model_init_device)
 
         logging.info(f"Creating VaceWanModel from {checkpoint_dir}")
         self.model = VaceWanModel.from_pretrained(checkpoint_dir)
@@ -121,7 +124,7 @@ class WanVace(WanT2V):
         if dit_fsdp:
             self.model = shard_fn(self.model)
         else:
-            self.model.to(self.device)
+            self.model.to(self.model_init_device)
 
         self.sample_neg_prompt = config.sample_neg_prompt
 
