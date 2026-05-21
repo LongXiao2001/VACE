@@ -146,6 +146,25 @@ class VaceWanModel(WanModel):
         if self._module_loader is not None:
             self._module_loader(names, keep_resident=self._module_keep_resident)
 
+    def _module_device(self, module):
+        if hasattr(module, "weight") and isinstance(module.weight, torch.Tensor):
+            return module.weight.device
+        if hasattr(module, "module"):
+            inner = module.module
+            try:
+                return next(inner.parameters()).device
+            except StopIteration:
+                pass
+            for buffer in inner.buffers():
+                return buffer.device
+        try:
+            return next(module.parameters()).device
+        except StopIteration:
+            pass
+        for buffer in module.buffers():
+            return buffer.device
+        return self.freqs.device
+
     def _run_runtime_block(self, block, *args, **kwargs):
         if not self._block_swap_enabled:
             return block(*args, **kwargs)
@@ -222,7 +241,7 @@ class VaceWanModel(WanModel):
         # if self.model_type == 'i2v':
         #     assert clip_fea is not None and y is not None
         # params
-        device = self.patch_embedding.weight.device
+        device = self._module_device(self.patch_embedding)
         if self.freqs.device != device:
             self.freqs = self.freqs.to(device)
 
