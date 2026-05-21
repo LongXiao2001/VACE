@@ -158,11 +158,23 @@ def enable_layer_vram_management(
         total_num_param=0,
     )
     model.layer_vram_management_enabled = True
+    model.layer_vram_onload_device = module_config["onload_device"]
+    model.layer_vram_offload_device = module_config["offload_device"]
 
 
 def wrapped_model_onload(model: nn.Module):
     if hasattr(model, "layer_vram_management_enabled") and model.layer_vram_management_enabled:
         for module in model.modules():
+            if not hasattr(module, "onload"):
+                for name, param in list(module._parameters.items()):
+                    if param is not None:
+                        module._parameters[name] = nn.Parameter(
+                            param.to(device=model.layer_vram_onload_device),
+                            requires_grad=param.requires_grad,
+                        )
+                for name, buffer in list(module._buffers.items()):
+                    if buffer is not None:
+                        module._buffers[name] = buffer.to(device=model.layer_vram_onload_device)
             if hasattr(module, "onload"):
                 module.onload()
 
@@ -170,5 +182,15 @@ def wrapped_model_onload(model: nn.Module):
 def wrapped_model_offload(model: nn.Module):
     if hasattr(model, "layer_vram_management_enabled") and model.layer_vram_management_enabled:
         for module in model.modules():
+            if not hasattr(module, "offload"):
+                for name, param in list(module._parameters.items()):
+                    if param is not None:
+                        module._parameters[name] = nn.Parameter(
+                            param.to(device=model.layer_vram_offload_device),
+                            requires_grad=param.requires_grad,
+                        )
+                for name, buffer in list(module._buffers.items()):
+                    if buffer is not None:
+                        module._buffers[name] = buffer.to(device=model.layer_vram_offload_device)
             if hasattr(module, "offload"):
                 module.offload()
