@@ -18,3 +18,5 @@ vace.egg-info
 *resources
 *.ipynb_checkpoints*
 *.vscode
+VACE-Benchmark/
+Wan2.1-VACE-14B/
