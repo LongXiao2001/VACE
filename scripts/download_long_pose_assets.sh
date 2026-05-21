@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(pwd)"
 MODEL_DIR="${ROOT_DIR}/models"
 BENCH_DIR="${ROOT_DIR}/benchmarks"
 
@@ -12,15 +12,10 @@ if ! command -v huggingface-cli >/dev/null 2>&1; then
 fi
 
 echo "Downloading VACE base model..."
-huggingface-cli download Wan-AI/Wan2.1-VACE-14B \
-  --local-dir "${MODEL_DIR}/Wan2.1-VACE-14B" \
-  --local-dir-use-symlinks False
+python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='Wan-AI/Wan2.1-VACE-14B', local_dir='${MODEL_DIR}/Wan2.1-VACE-14B', local_dir_use_symlinks=False)"
 
 echo "Downloading optional benchmark examples..."
-huggingface-cli download ali-vilab/VACE-Benchmark \
-  --repo-type dataset \
-  --local-dir "${BENCH_DIR}/VACE-Benchmark" \
-  --local-dir-use-symlinks False || true
+python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='ali-vilab/VACE-Benchmark', repo_type='dataset', local_dir='${BENCH_DIR}/VACE-Benchmark', local_dir_use_symlinks=False)" || true
 
 cat <<'EOF'
 

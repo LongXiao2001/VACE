@@ -4,11 +4,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-: "${CKPT_DIR:=models/Wan2.1-VACE-1.3B}"
+: "${CKPT_DIR:=models/Wan2.1-VACE-14B}"
 : "${POSE_VIDEO:=benchmarks/VACE-Benchmark/assets/examples/pose/src_video.mp4}"
 : "${PROMPT:=在一个热带的庆祝派对上，一家人围坐在椰子树下的长桌旁。桌上摆满了异国风味的美食。长辈们愉悦地交谈，年轻人兴奋地举杯碰撞，孩子们在沙滩上欢乐奔跑。背景中是湛蓝的海洋和明亮的阳光，营造出轻松的气氛。镜头以动态中景捕捉每个开心的瞬间，温暖的阳光映照着他们幸福的面庞。}"
 
 python vace/vace_wan_long_inference.py \
+  --model_name "vace-14B" \
   --ckpt_dir "$CKPT_DIR" \
   --src_video "$POSE_VIDEO" \
   --prompt "$PROMPT" \
