@@ -22,5 +22,7 @@ pycocotools
 timm
 onnxruntime-gpu
 BeautifulSoup4
+safetensors
+huggingface_hub
 #ltx-video@git+https://github.com/Lightricks/LTX-Video@ltx-video-0.9.1
 #wan@git+https://github.com/Wan-Video/Wan2.1

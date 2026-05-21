@@ -33,15 +33,9 @@ class VaceWanAttentionBlock(WanAttentionBlock):
     def forward(self, c, x, **kwargs):
         if self.block_id == 0:
             c = self.before_proj(c) + x
-            all_c = []
-        else:
-            all_c = list(torch.unbind(c))
-            c = all_c.pop(-1)
         c = super().forward(c, **kwargs)
         c_skip = self.after_proj(c)
-        all_c += [c_skip, c]
-        c = torch.stack(all_c)
-        return c
+        return c_skip, c
     
     
 class BaseWanAttentionBlock(WanAttentionBlock):
@@ -60,10 +54,10 @@ class BaseWanAttentionBlock(WanAttentionBlock):
         super().__init__(cross_attn_type, dim, ffn_dim, num_heads, window_size, qk_norm, cross_attn_norm, eps)
         self.block_id = block_id
 
-    def forward(self, x, hints, context_scale=1.0, **kwargs):
+    def forward(self, x, hint=None, context_scale=1.0, **kwargs):
         x = super().forward(x, **kwargs)
-        if self.block_id is not None:
-            x = x + hints[self.block_id] * context_scale
+        if hint is not None:
+            x = x + hint * context_scale
         return x
     
     
@@ -116,6 +110,53 @@ class VaceWanModel(WanModel):
         self.vace_patch_embedding = nn.Conv3d(
             self.vace_in_dim, self.dim, kernel_size=self.patch_size, stride=self.patch_size
         )
+        self._block_swap_enabled = False
+        self._hint_cpu_offload = False
+        self._runtime_device = None
+        self._module_loader = None
+        self._module_keep_resident = False
+        self._dit_block_module_names = [f"dit_block_{i}" for i in range(self.num_layers)]
+        self._vace_block_module_names = [f"vace_block_{i}" for i in range(len(self.vace_layers))]
+
+    def enable_block_swap(self, enabled=True, device=None):
+        self._block_swap_enabled = enabled
+        self._runtime_device = device
+        if enabled:
+            for block in self.blocks:
+                block.cpu()
+            for block in self.vace_blocks:
+                block.cpu()
+
+    def enable_vace_hint_cpu_offload(self, enabled=True):
+        self._hint_cpu_offload = enabled
+
+    def set_module_loader(self, loader=None, keep_resident=False):
+        self._module_loader = loader
+        self._module_keep_resident = keep_resident
+
+    def prepare_runtime_modules(self, device):
+        self.patch_embedding.to(device)
+        self.text_embedding.to(device)
+        self.time_embedding.to(device)
+        self.time_projection.to(device)
+        self.head.to(device)
+        self.vace_patch_embedding.to(device)
+
+    def _load_runtime_module(self, names):
+        if self._module_loader is not None:
+            self._module_loader(names, keep_resident=self._module_keep_resident)
+
+    def _run_runtime_block(self, block, *args, **kwargs):
+        if not self._block_swap_enabled:
+            return block(*args, **kwargs)
+
+        if self._runtime_device is None:
+            raise RuntimeError("Runtime device must be set when block swap is enabled.")
+
+        block = block.to(self._runtime_device)
+        output = block(*args, **kwargs)
+        block.cpu()
+        return output
 
     def forward_vace(
         self,
@@ -125,6 +166,7 @@ class VaceWanModel(WanModel):
         kwargs
     ):
         # embeddings
+        self._load_runtime_module(["vace_patch_embedding"])
         c = [self.vace_patch_embedding(u.unsqueeze(0)) for u in vace_context]
         c = [u.flatten(2).transpose(1, 2) for u in c]
         c = torch.cat([
@@ -136,9 +178,13 @@ class VaceWanModel(WanModel):
         new_kwargs = dict(x=x)
         new_kwargs.update(kwargs)
 
-        for block in self.vace_blocks:
-            c = block(c, **new_kwargs)
-        hints = torch.unbind(c)[:-1]
+        hints = []
+        for block_idx, block in enumerate(self.vace_blocks):
+            self._load_runtime_module([self._vace_block_module_names[block_idx]])
+            c_skip, c = self._run_runtime_block(block, c, **new_kwargs)
+            if self._hint_cpu_offload:
+                c_skip = c_skip.cpu()
+            hints.append(c_skip)
         return hints
 
     def forward(
@@ -184,6 +230,7 @@ class VaceWanModel(WanModel):
         #     x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
 
         # embeddings
+        self._load_runtime_module(["patch_embedding", "text_embedding", "time_embedding", "time_projection"])
         x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
         grid_sizes = torch.stack(
             [torch.tensor(u.shape[2:], dtype=torch.long) for u in x])
@@ -225,13 +272,21 @@ class VaceWanModel(WanModel):
             context_lens=context_lens)
 
         hints = self.forward_vace(x, vace_context, seq_len, kwargs)
-        kwargs['hints'] = hints
         kwargs['context_scale'] = vace_context_scale
 
-        for block in self.blocks:
-            x = block(x, **kwargs)
+        for block_idx, block in enumerate(self.blocks):
+            self._load_runtime_module([self._dit_block_module_names[block_idx]])
+            hint = None
+            if block.block_id is not None:
+                hint = hints[block.block_id]
+                if hint.device != x.device:
+                    hint = hint.to(x.device, non_blocking=True)
+            x = self._run_runtime_block(block, x, hint=hint, **kwargs)
+            if block.block_id is not None and self._hint_cpu_offload:
+                hints[block.block_id] = hint.cpu()
 
         # head
+        self._load_runtime_module(["head"])
         x = self.head(x, e)
 
         # unpatchify

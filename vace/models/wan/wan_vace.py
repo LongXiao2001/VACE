@@ -24,6 +24,8 @@ from tqdm import tqdm
 from wan.text2video import (WanT2V, T5EncoderModel, WanVAE, shard_model, FlowDPMSolverMultistepScheduler,
                                get_sampling_sigmas, retrieve_timesteps, FlowUniPCMultistepScheduler)
 from .modules.model import VaceWanModel
+from .lora_utils import LoRAManager
+from .runtime_vram import ModuleVRAMManager
 from ..utils.preprocessor import VaceVideoProcessor
 
 
@@ -123,6 +125,91 @@ class WanVace(WanT2V):
             zero_start=True,
             seq_len=32760,
             keep_last=True)
+        self.lora_manager = None
+        self.vram_manager = None
+        self.memory_log_enabled = False
+        self.memory_log_prefix = "WanVace"
+
+    def configure_runtime(
+        self,
+        block_swap=False,
+        vace_hint_cpu_offload=False,
+        lora_path=None,
+        lora_scale=1.0,
+        lora_dyn_offload=True,
+        module_vram_management=False,
+        module_vram_empty_cache=True,
+        module_vram_verbose=False,
+        module_vram_keep_resident=False,
+        memory_log=False,
+        memory_log_prefix="WanVace",
+    ):
+        self.memory_log_enabled = memory_log
+        self.memory_log_prefix = memory_log_prefix
+        self.model.enable_block_swap(enabled=block_swap, device=self.device)
+        self.model.enable_vace_hint_cpu_offload(enabled=vace_hint_cpu_offload)
+        self.vram_manager = ModuleVRAMManager(
+            device=self.device,
+            enabled=module_vram_management,
+            empty_cache=module_vram_empty_cache,
+            verbose=module_vram_verbose,
+        )
+        self.vram_manager.set_logger(logging.info)
+        self._register_vram_modules()
+        self.model.set_module_loader(self._load_runtime_modules, keep_resident=module_vram_keep_resident)
+        if lora_path:
+            self.lora_manager = LoRAManager(
+                model=self.model,
+                lora_path=lora_path,
+                scale=lora_scale,
+                dynamic_offload=lora_dyn_offload,
+            )
+        else:
+            self.lora_manager = None
+
+    def _register_vram_modules(self):
+        if self.vram_manager is None:
+            return
+        self.vram_manager.register_module("text_encoder", self.text_encoder.model, pinned=self.t5_cpu)
+        self.vram_manager.register_module("vae", self.vae.model)
+        self.vram_manager.register_module("patch_embedding", self.model.patch_embedding)
+        self.vram_manager.register_module("text_embedding", self.model.text_embedding)
+        self.vram_manager.register_module("time_embedding", self.model.time_embedding)
+        self.vram_manager.register_module("time_projection", self.model.time_projection)
+        self.vram_manager.register_module("head", self.model.head)
+        self.vram_manager.register_module("vace_patch_embedding", self.model.vace_patch_embedding)
+        for idx, block in enumerate(self.model.blocks):
+            self.vram_manager.register_module(f"dit_block_{idx}", block)
+        for idx, block in enumerate(self.model.vace_blocks):
+            self.vram_manager.register_module(f"vace_block_{idx}", block)
+
+    def _load_runtime_modules(self, names, keep_resident=False):
+        if self.vram_manager is None or not self.vram_manager.enabled:
+            return
+        self.vram_manager.load_modules(names)
+        if not keep_resident:
+            self.vram_manager.unload_modules(
+                [name for name in self.vram_manager._modules.keys() if name not in set(names)],
+                keep=names,
+            )
+
+    def _log_cuda_memory(self, tag):
+        if not self.memory_log_enabled or not torch.cuda.is_available():
+            return
+        device = self.device
+        allocated_mb = torch.cuda.memory_allocated(device) / 1024**2
+        reserved_mb = torch.cuda.memory_reserved(device) / 1024**2
+        max_allocated_mb = torch.cuda.max_memory_allocated(device) / 1024**2
+        max_reserved_mb = torch.cuda.max_memory_reserved(device) / 1024**2
+        logging.info(
+            "[%s] %s | allocated=%.1fMB reserved=%.1fMB max_allocated=%.1fMB max_reserved=%.1fMB",
+            self.memory_log_prefix,
+            tag,
+            allocated_mb,
+            reserved_mb,
+            max_allocated_mb,
+            max_reserved_mb,
+        )
 
     def vace_encode_frames(self, frames, ref_images, masks=None, vae=None):
         vae = self.vae if vae is None else vae
@@ -323,11 +410,22 @@ class WanVace(WanT2V):
         seed_g = torch.Generator(device=self.device)
         seed_g.manual_seed(seed)
 
+        if self.vram_manager is not None and self.vram_manager.enabled:
+            self.vram_manager.unload_modules()
+        self._log_cuda_memory("generate:start")
+
         if not self.t5_cpu:
-            self.text_encoder.model.to(self.device)
+            if self.vram_manager is not None:
+                self.vram_manager.load_modules(["text_encoder"])
+            else:
+                self.text_encoder.model.to(self.device)
+            self._log_cuda_memory("text_encoder:before_encode")
             context = self.text_encoder([input_prompt], self.device)
             context_null = self.text_encoder([n_prompt], self.device)
-            if offload_model:
+            self._log_cuda_memory("text_encoder:after_encode")
+            if self.vram_manager is not None and self.vram_manager.enabled:
+                self.vram_manager.unload_modules(["text_encoder"])
+            elif offload_model:
                 self.text_encoder.model.cpu()
         else:
             context = self.text_encoder([input_prompt], torch.device('cpu'))
@@ -336,9 +434,15 @@ class WanVace(WanT2V):
             context_null = [t.to(self.device) for t in context_null]
 
         # vace context encode
+        if self.vram_manager is not None and self.vram_manager.enabled:
+            self.vram_manager.load_modules(["vae"])
+        self._log_cuda_memory("vae:before_encode")
         z0 = self.vace_encode_frames(input_frames, input_ref_images, masks=input_masks)
         m0 = self.vace_encode_masks(input_masks, input_ref_images)
         z = self.vace_latent(z0, m0)
+        self._log_cuda_memory("vae:after_encode")
+        if self.vram_manager is not None and self.vram_manager.enabled:
+            self.vram_manager.unload_modules(["vae"])
 
         target_shape = list(z0[0].shape)
         target_shape[0] = int(target_shape[0] / 2)
@@ -364,6 +468,8 @@ class WanVace(WanT2V):
 
         # evaluation mode
         with amp.autocast(dtype=self.param_dtype), torch.no_grad(), no_sync():
+            if getattr(self.model, "_block_swap_enabled", False) or (self.vram_manager is not None and self.vram_manager.enabled):
+                self.model.prepare_runtime_modules(self.device)
 
             if sample_solver == 'unipc':
                 sample_scheduler = FlowUniPCMultistepScheduler(
@@ -392,17 +498,22 @@ class WanVace(WanT2V):
             arg_c = {'context': context, 'seq_len': seq_len}
             arg_null = {'context': context_null, 'seq_len': seq_len}
 
-            for _, t in enumerate(tqdm(timesteps)):
+            for step_idx, t in enumerate(tqdm(timesteps)):
                 latent_model_input = latents
                 timestep = [t]
 
                 timestep = torch.stack(timestep)
+                self._log_cuda_memory(f"denoise_step:{step_idx}:before_model")
 
-                self.model.to(self.device)
-                noise_pred_cond = self.model(
-                    latent_model_input, t=timestep, vace_context=z, vace_context_scale=context_scale, **arg_c)[0]
-                noise_pred_uncond = self.model(
-                    latent_model_input, t=timestep, vace_context=z, vace_context_scale=context_scale,**arg_null)[0]
+                if not getattr(self.model, "_block_swap_enabled", False) and not (self.vram_manager is not None and self.vram_manager.enabled):
+                    self.model.to(self.device)
+                lora_context = self.lora_manager.activated() if self.lora_manager is not None else noop_no_sync()
+                with lora_context:
+                    noise_pred_cond = self.model(
+                        latent_model_input, t=timestep, vace_context=z, vace_context_scale=context_scale, **arg_c)[0]
+                    noise_pred_uncond = self.model(
+                        latent_model_input, t=timestep, vace_context=z, vace_context_scale=context_scale, **arg_null)[0]
+                self._log_cuda_memory(f"denoise_step:{step_idx}:after_model")
 
                 noise_pred = noise_pred_uncond + guide_scale * (
                     noise_pred_cond - noise_pred_uncond)
@@ -414,19 +525,31 @@ class WanVace(WanT2V):
                     return_dict=False,
                     generator=seed_g)[0]
                 latents = [temp_x0.squeeze(0)]
+                self._log_cuda_memory(f"denoise_step:{step_idx}:after_scheduler")
 
             x0 = latents
-            if offload_model:
+            if self.lora_manager is not None and self.lora_manager.active:
+                self.lora_manager.remove()
+            if self.vram_manager is not None and self.vram_manager.enabled:
+                self.vram_manager.unload_modules()
+            elif offload_model:
                 self.model.cpu()
                 torch.cuda.empty_cache()
             if self.rank == 0:
+                if self.vram_manager is not None and self.vram_manager.enabled:
+                    self.vram_manager.load_modules(["vae"])
+                self._log_cuda_memory("vae:before_decode")
                 videos = self.decode_latent(x0, input_ref_images)
+                self._log_cuda_memory("vae:after_decode")
+                if self.vram_manager is not None and self.vram_manager.enabled:
+                    self.vram_manager.unload_modules(["vae"])
 
         del noise, latents
         del sample_scheduler
         if offload_model:
             gc.collect()
             torch.cuda.synchronize()
+        self._log_cuda_memory("generate:end")
         if dist.is_initialized():
             dist.barrier()
 

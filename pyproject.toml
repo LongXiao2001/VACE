@@ -35,7 +35,9 @@ dependencies = [
     "pycocotools",
     "timm",
     "onnxruntime-gpu",
-    "BeautifulSoup4"
+    "BeautifulSoup4",
+    "safetensors",
+    "huggingface_hub"
 ]
 
 [project.optional-dependencies]

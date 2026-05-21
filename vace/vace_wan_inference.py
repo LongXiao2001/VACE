@@ -178,6 +178,61 @@ def get_parser():
         type=float,
         default=5.0,
         help="Classifier free guidance scale.")
+    parser.add_argument(
+        "--block_swap",
+        type=str2bool,
+        default=False,
+        help="Whether to swap transformer blocks between CPU and GPU during forward.")
+    parser.add_argument(
+        "--vace_hint_cpu_offload",
+        type=str2bool,
+        default=False,
+        help="Whether to keep VACE control hints on CPU between block calls.")
+    parser.add_argument(
+        "--lora_path",
+        type=str,
+        default=None,
+        help="Optional LoRA checkpoint path (.safetensors or .pt).")
+    parser.add_argument(
+        "--lora_scale",
+        type=float,
+        default=1.0,
+        help="Scale factor for the loaded LoRA.")
+    parser.add_argument(
+        "--lora_dyn_offload",
+        type=str2bool,
+        default=True,
+        help="Whether to apply/remove LoRA weights on demand during denoising.")
+    parser.add_argument(
+        "--module_vram_management",
+        type=str2bool,
+        default=False,
+        help="Enable DiffSynth-style per-module VRAM management.")
+    parser.add_argument(
+        "--module_vram_empty_cache",
+        type=str2bool,
+        default=True,
+        help="Call torch.cuda.empty_cache() after unloading managed modules.")
+    parser.add_argument(
+        "--module_vram_verbose",
+        type=str2bool,
+        default=False,
+        help="Print module load and unload traces for VRAM management.")
+    parser.add_argument(
+        "--module_vram_keep_resident",
+        type=str2bool,
+        default=False,
+        help="Keep recently requested modules resident instead of unloading other groups immediately.")
+    parser.add_argument(
+        "--memory_log",
+        type=str2bool,
+        default=False,
+        help="Print CUDA memory stats for major stages and every denoising step.")
+    parser.add_argument(
+        "--memory_log_prefix",
+        type=str,
+        default="WanVace",
+        help="Prefix used in CUDA memory log lines.")
     return parser
 
 
@@ -280,6 +335,19 @@ def main(args):
         dit_fsdp=args.dit_fsdp,
         use_usp=(args.ulysses_size > 1 or args.ring_size > 1),
         t5_cpu=args.t5_cpu,
+    )
+    wan_vace.configure_runtime(
+        block_swap=args.block_swap,
+        vace_hint_cpu_offload=args.vace_hint_cpu_offload,
+        lora_path=args.lora_path,
+        lora_scale=args.lora_scale,
+        lora_dyn_offload=args.lora_dyn_offload,
+        module_vram_management=args.module_vram_management,
+        module_vram_empty_cache=args.module_vram_empty_cache,
+        module_vram_verbose=args.module_vram_verbose,
+        module_vram_keep_resident=args.module_vram_keep_resident,
+        memory_log=args.memory_log,
+        memory_log_prefix=args.memory_log_prefix,
     )
 
     src_video, src_mask, src_ref_images = wan_vace.prepare_source([args.src_video],
