@@ -162,35 +162,32 @@ def enable_layer_vram_management(
     model.layer_vram_offload_device = module_config["offload_device"]
 
 
+def _move_bare_state(module: nn.Module, device):
+    for name, param in list(module._parameters.items()):
+        if param is not None:
+            module._parameters[name] = nn.Parameter(
+                param.to(device=device),
+                requires_grad=param.requires_grad,
+            )
+    for name, buffer in list(module._buffers.items()):
+        if buffer is not None:
+            module._buffers[name] = buffer.to(device=device)
+
+
+def _switch_wrapped_tree(module: nn.Module, device, action: str):
+    if hasattr(module, action):
+        getattr(module, action)()
+        return
+    _move_bare_state(module, device)
+    for child in module.children():
+        _switch_wrapped_tree(child, device, action)
+
+
 def wrapped_model_onload(model: nn.Module):
     if hasattr(model, "layer_vram_management_enabled") and model.layer_vram_management_enabled:
-        for module in model.modules():
-            if not hasattr(module, "onload"):
-                for name, param in list(module._parameters.items()):
-                    if param is not None:
-                        module._parameters[name] = nn.Parameter(
-                            param.to(device=model.layer_vram_onload_device),
-                            requires_grad=param.requires_grad,
-                        )
-                for name, buffer in list(module._buffers.items()):
-                    if buffer is not None:
-                        module._buffers[name] = buffer.to(device=model.layer_vram_onload_device)
-            if hasattr(module, "onload"):
-                module.onload()
+        _switch_wrapped_tree(model, model.layer_vram_onload_device, "onload")
 
 
 def wrapped_model_offload(model: nn.Module):
     if hasattr(model, "layer_vram_management_enabled") and model.layer_vram_management_enabled:
-        for module in model.modules():
-            if not hasattr(module, "offload"):
-                for name, param in list(module._parameters.items()):
-                    if param is not None:
-                        module._parameters[name] = nn.Parameter(
-                            param.to(device=model.layer_vram_offload_device),
-                            requires_grad=param.requires_grad,
-                        )
-                for name, buffer in list(module._buffers.items()):
-                    if buffer is not None:
-                        module._buffers[name] = buffer.to(device=model.layer_vram_offload_device)
-            if hasattr(module, "offload"):
-                module.offload()
+        _switch_wrapped_tree(model, model.layer_vram_offload_device, "offload")
