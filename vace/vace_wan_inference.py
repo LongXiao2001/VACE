@@ -377,10 +377,18 @@ def main(args):
         layer_vram_verbose=args.layer_vram_verbose,
     )
 
-    src_video, src_mask, src_ref_images = wan_vace.prepare_source([args.src_video],
-                                                                  [args.src_mask],
-                                                                  [None if args.src_ref_images is None else args.src_ref_images.split(',')],
-                                                                  args.frame_num, SIZE_CONFIGS[args.size], device)
+    no_vace_condition = args.src_video is None and args.src_mask is None and args.src_ref_images is None
+    if no_vace_condition:
+        src_video, src_mask, src_ref_images = [None], [None], [None]
+    else:
+        src_video, src_mask, src_ref_images = wan_vace.prepare_source(
+            [args.src_video],
+            [args.src_mask],
+            [None if args.src_ref_images is None else args.src_ref_images.split(',')],
+            args.frame_num,
+            SIZE_CONFIGS[args.size],
+            device,
+        )
 
     logging.info(f"Generating video...")
     video = wan_vace.generate(
@@ -420,27 +428,29 @@ def main(args):
         logging.info(f"Saving generated video to {save_file}")
         ret_data['out_video'] = save_file
 
-        save_file = os.path.join(save_dir, 'src_video.mp4')
-        cache_video(
-            tensor=src_video[0][None],
-            save_file=save_file,
-            fps=cfg.sample_fps,
-            nrow=1,
-            normalize=True,
-            value_range=(-1, 1))
-        logging.info(f"Saving src_video to {save_file}")
-        ret_data['src_video'] = save_file
+        if src_video[0] is not None:
+            save_file = os.path.join(save_dir, 'src_video.mp4')
+            cache_video(
+                tensor=src_video[0][None],
+                save_file=save_file,
+                fps=cfg.sample_fps,
+                nrow=1,
+                normalize=True,
+                value_range=(-1, 1))
+            logging.info(f"Saving src_video to {save_file}")
+            ret_data['src_video'] = save_file
 
-        save_file = os.path.join(save_dir, 'src_mask.mp4')
-        cache_video(
-            tensor=src_mask[0][None],
-            save_file=save_file,
-            fps=cfg.sample_fps,
-            nrow=1,
-            normalize=True,
-            value_range=(0, 1))
-        logging.info(f"Saving src_mask to {save_file}")
-        ret_data['src_mask'] = save_file
+        if src_mask[0] is not None:
+            save_file = os.path.join(save_dir, 'src_mask.mp4')
+            cache_video(
+                tensor=src_mask[0][None],
+                save_file=save_file,
+                fps=cfg.sample_fps,
+                nrow=1,
+                normalize=True,
+                value_range=(0, 1))
+            logging.info(f"Saving src_mask to {save_file}")
+            ret_data['src_mask'] = save_file
 
         if src_ref_images[0] is not None:
             for i, ref_img in enumerate(src_ref_images[0]):

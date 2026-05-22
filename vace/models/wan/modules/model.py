@@ -184,6 +184,9 @@ class VaceWanModel(WanModel):
         seq_len,
         kwargs
     ):
+        if vace_context is None:
+            return None
+
         # embeddings
         self._load_runtime_module(["vace_patch_embedding"])
         c = [self.vace_patch_embedding(u.unsqueeze(0)) for u in vace_context]
@@ -210,9 +213,9 @@ class VaceWanModel(WanModel):
         self,
         x,
         t,
-        vace_context,
-        context,
-        seq_len,
+        vace_context=None,
+        context=None,
+        seq_len=None,
         vace_context_scale=1.0,
         clip_fea=None,
         y=None,
@@ -296,12 +299,12 @@ class VaceWanModel(WanModel):
         for block_idx, block in enumerate(self.blocks):
             self._load_runtime_module([self._dit_block_module_names[block_idx]])
             hint = None
-            if block.block_id is not None:
+            if hints is not None and block.block_id is not None:
                 hint = hints[block.block_id]
                 if hint.device != x.device:
                     hint = hint.to(x.device, non_blocking=True)
             x = self._run_runtime_block(block, x, hint=hint, **kwargs)
-            if block.block_id is not None and self._hint_cpu_offload:
+            if hints is not None and block.block_id is not None and self._hint_cpu_offload:
                 hints[block.block_id] = hint.cpu()
 
         # head

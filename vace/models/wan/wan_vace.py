@@ -548,6 +548,9 @@ class WanVace(WanT2V):
         seed = seed if seed >= 0 else random.randint(0, sys.maxsize)
         seed_g = torch.Generator(device=self.device)
         seed_g.manual_seed(seed)
+        use_vace_condition = any(frame is not None for frame in input_frames) or any(
+            refs is not None and len(refs) > 0 for refs in input_ref_images
+        )
 
         if self.vram_manager is not None and self.vram_manager.enabled:
             self.vram_manager.unload_modules()
@@ -577,25 +580,33 @@ class WanVace(WanT2V):
             context_null = [t.to(self.device) for t in context_null]
 
         # vace context encode
-        if self.layer_vram_enabled:
-            wrapped_model_onload(self.vae.model)
-            self._move_vae_runtime_state(self.device)
-        elif self.vram_manager is not None and self.vram_manager.enabled:
-            self.vram_manager.load_modules(["vae"])
-            self._move_vae_runtime_state(self.device)
-        self._log_cuda_memory("vae:before_encode")
-        z0 = self.vace_encode_frames(input_frames, input_ref_images, masks=input_masks)
-        m0 = self.vace_encode_masks(input_masks, input_ref_images)
-        z = self.vace_latent(z0, m0)
-        self._log_cuda_memory("vae:after_encode")
-        if self.layer_vram_enabled:
-            self._layer_managed_offload(self.vae.model, move_vae_state_to_cpu=True)
-        elif self.vram_manager is not None and self.vram_manager.enabled:
-            self.vram_manager.unload_modules(["vae"])
-            self._move_vae_runtime_state(torch.device("cpu"))
-
-        target_shape = list(z0[0].shape)
-        target_shape[0] = int(target_shape[0] / 2)
+        z = None
+        if use_vace_condition:
+            if self.layer_vram_enabled:
+                wrapped_model_onload(self.vae.model)
+                self._move_vae_runtime_state(self.device)
+            elif self.vram_manager is not None and self.vram_manager.enabled:
+                self.vram_manager.load_modules(["vae"])
+                self._move_vae_runtime_state(self.device)
+            self._log_cuda_memory("vae:before_encode")
+            z0 = self.vace_encode_frames(input_frames, input_ref_images, masks=input_masks)
+            m0 = self.vace_encode_masks(input_masks, input_ref_images)
+            z = self.vace_latent(z0, m0)
+            self._log_cuda_memory("vae:after_encode")
+            if self.layer_vram_enabled:
+                self._layer_managed_offload(self.vae.model, move_vae_state_to_cpu=True)
+            elif self.vram_manager is not None and self.vram_manager.enabled:
+                self.vram_manager.unload_modules(["vae"])
+                self._move_vae_runtime_state(torch.device("cpu"))
+            target_shape = list(z0[0].shape)
+            target_shape[0] = int(target_shape[0] / 2)
+        else:
+            target_shape = (
+                self.vae.model.z_dim,
+                (frame_num - 1) // self.vae_stride[0] + 1,
+                size[1] // self.vae_stride[1],
+                size[0] // self.vae_stride[2],
+            )
         noise = [
             torch.randn(
                 target_shape[0],
@@ -659,7 +670,9 @@ class WanVace(WanT2V):
                     wrapped_model_onload(self.model)
                 elif not getattr(self.model, "_block_swap_enabled", False) and not (self.vram_manager is not None and self.vram_manager.enabled):
                     self.model.to(self.device)
-                lora_context = self.lora_manager.activated() if self.lora_manager is not None else noop_no_sync()
+                if self.lora_manager is not None and not self.lora_manager.dynamic_offload and not self.lora_manager.active:
+                    self.lora_manager.apply()
+                lora_context = self.lora_manager.activated() if self.lora_manager is not None and self.lora_manager.dynamic_offload else noop_no_sync()
                 with lora_context:
                     noise_pred_cond = self.model(
                         latent_model_input, t=timestep, vace_context=z, vace_context_scale=context_scale, **arg_c)[0]
@@ -699,7 +712,7 @@ class WanVace(WanT2V):
                     self.vram_manager.load_modules(["vae"])
                     self._move_vae_runtime_state(self.device)
                 self._log_cuda_memory("vae:before_decode")
-                videos = self.decode_latent(x0, input_ref_images)
+                videos = self.decode_latent(x0, input_ref_images if use_vace_condition else None)
                 self._log_cuda_memory("vae:after_decode")
                 if self.layer_vram_enabled:
                     self._layer_managed_offload(self.vae.model, move_vae_state_to_cpu=True)

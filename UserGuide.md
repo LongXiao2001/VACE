@@ -114,6 +114,12 @@ python vace/vace_wan_inference.py --src_video <path-to-src-video> --src_mask <pa
 python vace/vace_ltx_inference.py --src_video <path-to-src-video> --src_mask <path-to-src-mask> --src_ref_images <paths-to-src-ref-images> --prompt <prompt>  # ltx
 ```
 
+For a minimal pose-driven sanity check with two reference images and no long-video orchestration, you can also use:
+```bash
+bash run_vace_wan_pose_refs.sh
+```
+This path uses a single pose video as `src_video`, passes two reference images through `src_ref_images`, and keeps the denoising memory logs disabled so you can focus on whether VACE itself behaves normally.
+
 2) Gradio Interactive: Launch the graphical interface for model inference and perform inference through interactions on the interface. The specific command is as follows:
 ```bash
 python vace/gradios/vace_wan_demo.py  # wan
